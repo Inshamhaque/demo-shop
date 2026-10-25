@@ -1,0 +1,35 @@
+# Demo shop with a steady stream of traffic, so the backend's watcher sees real failures without a button press.
+#
+#   cd demo-shop
+#   docker compose up --build -d      # build locally and run in the background
+#
+# To run a pushed image instead, set DEMO_IMAGE (see docs in the root README) and use `docker compose pull`.
+#
+# The shop writes ./shared-logs/shop.log. The backend reads that file through the MCP stand-in:
+#   SHOP_LOG=<repo>/demo-shop/shared-logs/shop.log
+#   SHOP_METRICS_URL=http://127.0.0.1:8100/metrics
+#   AUTO_DETECT=1
+#
+# This file never pushes code. Patches reach GitHub only after a human approves them in the UI.
+services:
+  shop:
+    build: .
+    image: ${DEMO_IMAGE:-batpatcher-demo-shop:latest}
+    ports:
+      - "8100:8100"
+    volumes:
+      - ./shared-logs:/app/logs
+    restart: unless-stopped
+
+  loadgen:
+    image: ${DEMO_IMAGE:-batpatcher-demo-shop:latest}
+    depends_on:
+      - shop
+    restart: unless-stopped
+    volumes:
+      # Edit bug_mix.json on the host to change which bugs are active. Takes effect on the next batch, no restart.
+      - ./bug_mix.json:/app/bug_mix.json:ro
+    # About one order per second, in short batches, so the shared log grows at a readable pace.
+    command: >
+      sh -c "while true; do python -m service.loadgen --url http://shop:8100 --count 20
+      --mix-file /app/bug_mix.json --interval 1.0; sleep 10; done"

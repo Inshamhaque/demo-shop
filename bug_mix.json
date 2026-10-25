@@ -1,0 +1,6 @@
+{
+  "_comment": "Live bug mix. Each value is the share of orders that trigger that bug (0 to 1). Set one to 0 to turn that bug off. Edits take effect on the next batch, about 30 seconds, with no restart.",
+  "crash": 0.2,
+  "coupon": 0.2,
+  "money": 0.2
+}

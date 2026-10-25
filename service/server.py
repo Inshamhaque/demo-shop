@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import threading
 import time
@@ -25,6 +26,8 @@ from pathlib import Path
 DEMO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(DEMO_ROOT))
 
+from shop.invariants import check  # noqa: E402
+from shop.logfile import DEFAULT_BACKUPS, DEFAULT_MAX_BYTES, append_line  # noqa: E402
 from shop.summary import Order, build_summary  # noqa: E402
 
 SERVICE = "shop-api"
@@ -84,6 +87,8 @@ class ShopHandler(BaseHTTPRequestHandler):
     metrics: Metrics
     log_path: Path
     log_lock: threading.Lock
+    log_max_bytes: int
+    log_backups: int
 
     def log_message(self, format, *args):  # keep the console quiet; the JSON log is the record
         return
@@ -97,9 +102,8 @@ class ShopHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def _write_log(self, record: dict) -> None:
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        with self.log_lock, self.log_path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record) + "\n")
+        with self.log_lock:
+            append_line(self.log_path, json.dumps(record) + "\n", self.log_max_bytes, self.log_backups)
 
     def do_GET(self) -> None:
         if self.path == "/metrics":
@@ -116,7 +120,19 @@ class ShopHandler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", "0"))
             order = Order(**json.loads(self.rfile.read(length) or b"{}"))
-            self._send(200, json.dumps(build_summary(order)))
+            summary = build_summary(order)
+            for rule, detail in check(order, summary):
+                # A broken business rule is not a crash, so the answer still goes out. It is logged as a canary.
+                self._write_log({
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "level": "ERROR",
+                    "service": SERVICE,
+                    "message": f"canary: {rule} rule broken for order {order.order_id}: {detail}",
+                    "error_type": "InvariantViolation",
+                    "rule": rule,
+                    "stack_trace": "",
+                })
+            self._send(200, json.dumps(summary))
         except Exception as exc:  # the shop must answer every request, even when its own code fails
             failed = True
             self._write_log({
@@ -132,21 +148,25 @@ class ShopHandler(BaseHTTPRequestHandler):
             self.metrics.observe(time.monotonic() - started, failed)
 
 
-def make_server(port: int = 0, log_path: Path = DEFAULT_LOG) -> ThreadingHTTPServer:
+def make_server(port: int = 0, log_path: Path = DEFAULT_LOG, host: str = "127.0.0.1") -> ThreadingHTTPServer:
     handler = type("BoundShopHandler", (ShopHandler,), {
         "metrics": Metrics(),
         "log_path": log_path,
         "log_lock": threading.Lock(),
+        "log_max_bytes": int(os.environ.get("SHOP_LOG_MAX_BYTES", DEFAULT_MAX_BYTES)),
+        "log_backups": int(os.environ.get("SHOP_LOG_BACKUPS", DEFAULT_BACKUPS)),
     })
-    return ThreadingHTTPServer(("127.0.0.1", port), handler)
+    # 0.0.0.0 inside the Docker image, so the published port is reachable from the host.
+    return ThreadingHTTPServer((host, port), handler)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Run the demo shop as an HTTP service.")
     parser.add_argument("--port", type=int, default=8100)
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
+    parser.add_argument("--host", default="127.0.0.1")
     args = parser.parse_args()
-    server = make_server(args.port, args.log)
+    server = make_server(args.port, args.log, args.host)
     print(f"demo shop listening on http://127.0.0.1:{args.port} (logs: {args.log})")
     try:
         server.serve_forever()
