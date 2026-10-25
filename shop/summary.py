@@ -16,7 +16,8 @@ class Order:
 
 
 def build_summary(order: Order) -> dict:
-    total = order.total * (1 - order.discount)
+    discount = order.discount if order.discount is not None else 0
+    total = order.total * (1 - discount)
     if order.coupon:
-        total = total * (1 - order.discount)
+        total = total * (1 - discount)
     return {"order_id": order.order_id, "total": total, "currency": "GBP"}
